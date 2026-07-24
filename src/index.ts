@@ -3,6 +3,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { google } from "googleapis";
 import { z } from "zod";
+import { timingSafeEqual } from "node:crypto";
 import { GmailService } from "./gmail-service.js";
 import { TokenStore } from "./token-store.js";
 
@@ -15,6 +16,15 @@ const SERVER_URL = process.env.SERVER_URL || `http://localhost:${PORT}`;
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID!;
 const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET!;
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD!;
+const MCP_SECRET = process.env.MCP_SECRET;
+
+if (!MCP_SECRET || MCP_SECRET.length < 32) {
+  throw new Error(
+    "MCP_SECRET environment variable is required and must be at least 32 characters. " +
+      "Generate one with: openssl rand -hex 32"
+  );
+}
+
 const SCOPES = [
   "https://www.googleapis.com/auth/gmail.readonly",
   "https://www.googleapis.com/auth/gmail.modify",
@@ -366,6 +376,19 @@ function requireAdmin(req: Request, res: Response, next: NextFunction): void {
   next();
 }
 
+function requireMcpSecret(req: Request, res: Response, next: NextFunction): void {
+  const provided = Buffer.from(String(req.params.secret ?? ""));
+  const expected = Buffer.from(MCP_SECRET as string);
+
+  // Length check first: timingSafeEqual throws if the buffers differ in length.
+  if (provided.length !== expected.length || !timingSafeEqual(provided, expected)) {
+    // 404 rather than 401, so a scanner cannot confirm the endpoint exists.
+    res.status(404).end();
+    return;
+  }
+  next();
+}
+
 // ---------------------------------------------------------------------------
 // Setup page — manage connected Gmail accounts
 // ---------------------------------------------------------------------------
@@ -428,7 +451,7 @@ app.get("/setup", requireAdmin, (_req: Request, res: Response) => {
       ` : ""}
       <hr style="margin-top:40px;border:none;border-top:1px solid #eee" />
       <p style="color:#888;font-size:13px">
-        MCP endpoint: <code>${SERVER_URL}/mcp</code><br/>
+        MCP endpoint: <code>${SERVER_URL}/mcp/&lt;your MCP_SECRET&gt;</code><br/>
         Connected accounts: ${accounts.length}
       </p>
     </body>
@@ -541,7 +564,7 @@ app.get("/health", (_req, res) => {
 // MCP transport — Streamable HTTP (stateless: each request gets a fresh server)
 // ---------------------------------------------------------------------------
 
-app.post("/mcp", async (req: Request, res: Response) => {
+app.post("/mcp/:secret", requireMcpSecret, async (req: Request, res: Response) => {
   try {
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: undefined, // stateless — no session tracking
@@ -569,7 +592,7 @@ app.post("/mcp", async (req: Request, res: Response) => {
   }
 });
 
-app.get("/mcp", async (req: Request, res: Response) => {
+app.get("/mcp/:secret", requireMcpSecret, async (req: Request, res: Response) => {
   res.status(405).json({
     jsonrpc: "2.0",
     error: { code: -32000, message: "SSE streams not supported in stateless mode. Use POST." },
@@ -577,7 +600,7 @@ app.get("/mcp", async (req: Request, res: Response) => {
   });
 });
 
-app.delete("/mcp", async (req: Request, res: Response) => {
+app.delete("/mcp/:secret", requireMcpSecret, async (req: Request, res: Response) => {
   res.status(405).json({
     jsonrpc: "2.0",
     error: { code: -32000, message: "Session management not used in stateless mode." },
@@ -591,7 +614,7 @@ app.delete("/mcp", async (req: Request, res: Response) => {
 
 app.listen(PORT, () => {
   console.log(`Gmail MCP server listening on port ${PORT}`);
-  console.log(`  MCP endpoint:  ${SERVER_URL}/mcp`);
+  console.log(`  MCP endpoint:  ${SERVER_URL}/mcp/<MCP_SECRET>`);
   console.log(`  Setup page:    ${SERVER_URL}/setup`);
   console.log(`  Health check:  ${SERVER_URL}/health`);
   console.log(`  Accounts:      ${tokenStore.size}`);
