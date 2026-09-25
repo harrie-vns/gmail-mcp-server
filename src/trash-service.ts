@@ -69,11 +69,20 @@ export class TrashService {
     return this.move(target, "trash");
   }
 
-  async untrash(target: TrashTarget): Promise<TrashResult> {
-    return this.move(target, "untrash");
+  /**
+   * Gmail's untrash only removes the TRASH label, and trashing already took
+   * INBOX away, so a bare untrash leaves the mail archived. toInbox puts it
+   * back in the Inbox too, the same as Gmail's own "Move to Inbox" from Trash.
+   */
+  async untrash(target: TrashTarget, toInbox: boolean): Promise<TrashResult> {
+    return this.move(target, "untrash", toInbox);
   }
 
-  private async move(target: TrashTarget, action: "trash" | "untrash"): Promise<TrashResult> {
+  private async move(
+    target: TrashTarget,
+    action: "trash" | "untrash",
+    toInbox = false
+  ): Promise<TrashResult> {
     const metadataHeaders = ["From", "Subject", "Date"];
 
     if ("messageId" in target) {
@@ -87,6 +96,13 @@ export class TrashService {
         action === "trash"
           ? await this.gmail.users.messages.trash({ userId: "me", id: target.messageId })
           : await this.gmail.users.messages.untrash({ userId: "me", id: target.messageId });
+      if (action === "untrash" && toInbox) {
+        await this.gmail.users.messages.modify({
+          userId: "me",
+          id: target.messageId,
+          requestBody: { addLabelIds: ["INBOX"] },
+        });
+      }
       const after = await this.gmail.users.messages.get({
         userId: "me",
         id: res.data.id ?? target.messageId,
@@ -106,6 +122,13 @@ export class TrashService {
       await this.gmail.users.threads.trash({ userId: "me", id: target.threadId });
     } else {
       await this.gmail.users.threads.untrash({ userId: "me", id: target.threadId });
+      if (toInbox) {
+        await this.gmail.users.threads.modify({
+          userId: "me",
+          id: target.threadId,
+          requestBody: { addLabelIds: ["INBOX"] },
+        });
+      }
     }
     const after = await this.gmail.users.threads.get({
       userId: "me",

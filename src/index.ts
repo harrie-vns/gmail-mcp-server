@@ -469,17 +469,21 @@ function createMcpServer(): McpServer {
   // ---- untrash_email ----
   server.tool(
     "untrash_email",
-    "Move a message (message_id) or whole thread (thread_id) back out of Trash, undoing trash_email. Returns the sender, subject and date of what was restored.",
+    "Move a message (message_id) or whole thread (thread_id) back out of Trash, undoing trash_email. By default it goes back to the Inbox, like Gmail's 'Move to Inbox'; pass to_inbox=false to restore it archived. Returns the sender, subject and date of what was restored.",
     {
       account: z.string().describe("The connected address the mail belongs to (one account, not 'all')"),
       message_id: z.string().optional().describe("Restore this one message"),
       thread_id: z.string().optional().describe("Restore every message in this thread"),
+      to_inbox: z
+        .boolean()
+        .default(true)
+        .describe("Put it back in the Inbox (default). false restores it to All Mail only."),
     },
     { title: "Restore from Trash", readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-    async ({ account, message_id, thread_id }) => {
+    async ({ account, message_id, thread_id, to_inbox }) => {
       const target = trashTarget(message_id, thread_id);
       const trash = await getTrashServiceForAccount(account);
-      return textResult({ account, restored: true, ...(await trash.untrash(target)) });
+      return textResult({ account, restored: true, ...(await trash.untrash(target, to_inbox)) });
     }
   );
 
