@@ -104,6 +104,30 @@ function gmailError(err: any, what: string): Error {
   return err instanceof Error ? err : new Error(String(err));
 }
 
+/**
+ * SENDER_NAMES: JSON of account address -> From name, e.g.
+ * {"harrie@tarcombe.farm":"Tarcombe Farm, Little River"}. A malformed value
+ * is an error, not a silent fallback to the bare address.
+ */
+function senderNames(): Record<string, string> {
+  const raw = process.env.SENDER_NAMES;
+  if (!raw) return {};
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error("The SENDER_NAMES setting is not valid JSON.");
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("The SENDER_NAMES setting must be a JSON object of address to name.");
+  }
+  return Object.fromEntries(
+    Object.entries(parsed as Record<string, unknown>)
+      .filter(([, v]) => typeof v === "string" && v.trim())
+      .map(([k, v]) => [k.toLowerCase(), (v as string).trim()])
+  );
+}
+
 export class DraftService {
   private gmail: gmail_v1.Gmail;
 
@@ -117,8 +141,14 @@ export class DraftService {
     return `https://mail.google.com/mail/u/${encodeURIComponent(this.account)}/#drafts?compose=${messageId}`;
   }
 
-  /** The account's own address, with the display name Gmail sends under. */
+  /**
+   * The account's own address, with the name its mail should go out under:
+   * the SENDER_NAMES setting first (the owner's choice per account), then the
+   * Gmail send-as display name, else the bare address.
+   */
   private async fromAddress(): Promise<Address> {
+    const configured = senderNames()[this.account.toLowerCase()];
+    if (configured) return { name: configured, email: this.account };
     try {
       const res = await this.gmail.users.settings.sendAs.list({ userId: "me" });
       const own = res.data.sendAs?.find(
@@ -128,40 +158,7 @@ export class DraftService {
     } catch {
       // The display name is cosmetic; the address alone is still correct.
     }
-    // A primary address usually has no sendAs display name: Gmail sends under
-    // the Google account's name instead. Take that name from the account's own
-    // most recent sent mail, so drafts read the same as mail sent from Gmail.
-    const name = await this.nameFromSentMail();
-    return name ? { name, email: this.account } : { email: this.account };
-  }
-
-  private async nameFromSentMail(): Promise<string | undefined> {
-    try {
-      const list = await this.gmail.users.messages.list({
-        userId: "me",
-        q: "in:sent",
-        maxResults: 10,
-      });
-      for (const m of list.data.messages ?? []) {
-        const res = await this.gmail.users.messages.get({
-          userId: "me",
-          id: m.id!,
-          format: "metadata",
-          metadataHeaders: ["From"],
-        });
-        try {
-          const from = parseAddress(header(res.data.payload?.headers, "From"));
-          if (from.name && from.email.toLowerCase() === this.account.toLowerCase()) {
-            return from.name;
-          }
-        } catch {
-          // An unreadable From on one message; try the next.
-        }
-      }
-    } catch {
-      // Cosmetic, as above.
-    }
-    return undefined;
+    return { email: this.account };
   }
 
   // -----------------------------------------------------------------------
