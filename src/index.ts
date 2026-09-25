@@ -5,6 +5,7 @@ import { google } from "googleapis";
 import { z } from "zod";
 import { timingSafeEqual } from "node:crypto";
 import { GmailService } from "./gmail-service.js";
+import { DraftService } from "./draft-service.js";
 import { TokenStore } from "./token-store.js";
 
 // ---------------------------------------------------------------------------
@@ -50,6 +51,18 @@ function makeOAuth2Client() {
 }
 
 async function getGmailServiceForAccount(email: string): Promise<GmailService> {
+  return new GmailService(await accessTokenFor(email));
+}
+
+async function getDraftServiceForAccount(account: string): Promise<DraftService> {
+  if (account.trim().toLowerCase() === "all") {
+    throw new Error('Drafts belong to one account. Pass a single connected address, not "all".');
+  }
+  const [email] = resolveAccounts(account);
+  return new DraftService(await accessTokenFor(email), email);
+}
+
+async function accessTokenFor(email: string): Promise<string> {
   const refreshToken = tokenStore.getRefreshToken(email);
   if (!refreshToken) {
     throw new Error(
@@ -67,7 +80,7 @@ async function getGmailServiceForAccount(email: string): Promise<GmailService> {
     );
   }
 
-  return new GmailService(token);
+  return token;
 }
 
 function resolveAccounts(account: string): string[] {
@@ -282,6 +295,148 @@ function createMcpServer(): McpServer {
           },
         ],
       };
+    }
+  );
+
+  // ---- Drafts ----
+  // Creating, listing, reading, updating and deleting drafts never sends,
+  // labels, archives or marks anything read. Sending is send_draft alone.
+
+  const accountParam = z
+    .string()
+    .describe("The connected address the draft belongs to (one account, not 'all')");
+  const addressesParam = z
+    .union([z.string(), z.array(z.string())])
+    .optional();
+
+  const textResult = (value: unknown) => ({
+    content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }],
+  });
+
+  // ---- create_draft ----
+  server.tool(
+    "create_draft",
+    "Create a draft in the account's Gmail Drafts folder. It is NOT sent. With reply_to_message_id the draft is threaded as a reply: same thread, 'Re:' subject, In-Reply-To and References set, and To defaults to the original sender (its Reply-To if it has one). From is always the account's own address. The body is stored exactly as given: Gmail does not add a signature to API drafts, so include one in the body if wanted.",
+    {
+      account: accountParam,
+      to: addressesParam.describe(
+        "Recipient(s): an address, 'Name <address>', a comma-separated string, or an array. Required unless replying."
+      ),
+      cc: addressesParam.describe("Optional Cc recipient(s), same forms as 'to'"),
+      subject: z
+        .string()
+        .optional()
+        .describe("Subject. Required unless replying; for a reply it defaults to 'Re: <original subject>'."),
+      body_text: z.string().describe("Plain-text body, stored exactly as given"),
+      body_html: z
+        .string()
+        .optional()
+        .describe("Optional HTML body, sent alongside body_text as the rich version"),
+      reply_to_message_id: z
+        .string()
+        .optional()
+        .describe("Gmail message ID to reply to. The draft joins that message's thread."),
+    },
+    { title: "Create draft", readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+    async ({ account, to, cc, subject, body_text, body_html, reply_to_message_id }) => {
+      const drafts = await getDraftServiceForAccount(account);
+      const draft = await drafts.createDraft({
+        to,
+        cc,
+        subject,
+        bodyText: body_text,
+        bodyHtml: body_html,
+        replyToMessageId: reply_to_message_id,
+      });
+      return textResult({ account, ...draft, sent: false });
+    }
+  );
+
+  // ---- list_drafts ----
+  server.tool(
+    "list_drafts",
+    "List the account's drafts, newest first: draft ID, to, subject, threadId and when it was last updated.",
+    {
+      account: accountParam,
+      max_results: z
+        .number()
+        .min(1)
+        .max(100)
+        .default(25)
+        .describe("Maximum number of drafts to return (1-100)"),
+    },
+    { title: "List drafts", readOnlyHint: true, openWorldHint: false },
+    async ({ account, max_results }) => {
+      const drafts = await getDraftServiceForAccount(account);
+      return textResult({ account, drafts: await drafts.listDrafts(max_results) });
+    }
+  );
+
+  // ---- get_draft ----
+  server.tool(
+    "get_draft",
+    "Get one draft in full: recipients, subject, threading headers, plain-text and HTML body, and a Gmail link to open it.",
+    {
+      account: accountParam,
+      draft_id: z.string().describe("The draft ID (from create_draft or list_drafts)"),
+    },
+    { title: "Get draft", readOnlyHint: true, openWorldHint: false },
+    async ({ account, draft_id }) => {
+      const drafts = await getDraftServiceForAccount(account);
+      return textResult({ account, ...(await drafts.getDraft(draft_id)) });
+    }
+  );
+
+  // ---- update_draft ----
+  server.tool(
+    "update_draft",
+    "Replace the subject and/or body of an existing draft. Recipients and threading are kept. Passing body_text without body_html makes the draft plain text; body_html needs body_text alongside it. Nothing is sent.",
+    {
+      account: accountParam,
+      draft_id: z.string().describe("The draft ID to update"),
+      subject: z.string().optional().describe("New subject"),
+      body_text: z.string().optional().describe("New plain-text body, stored exactly as given"),
+      body_html: z.string().optional().describe("New HTML body (requires body_text)"),
+    },
+    { title: "Update draft", readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+    async ({ account, draft_id, subject, body_text, body_html }) => {
+      const drafts = await getDraftServiceForAccount(account);
+      const draft = await drafts.updateDraft(draft_id, {
+        subject,
+        bodyText: body_text,
+        bodyHtml: body_html,
+      });
+      return textResult({ account, ...draft, sent: false });
+    }
+  );
+
+  // ---- delete_draft ----
+  server.tool(
+    "delete_draft",
+    "Delete a draft by its draft ID. This can only ever delete a draft, never a received or sent message.",
+    {
+      account: accountParam,
+      draft_id: z.string().describe("The draft ID to delete"),
+    },
+    { title: "Delete draft", readOnlyHint: false, destructiveHint: true, openWorldHint: false },
+    async ({ account, draft_id }) => {
+      const drafts = await getDraftServiceForAccount(account);
+      return textResult({ account, ...(await drafts.deleteDraft(draft_id)) });
+    }
+  );
+
+  // ---- send_draft ----
+  server.tool(
+    "send_draft",
+    "SENDS an existing draft as real email. Only call this when the user has, in this conversation, explicitly told you to send this specific draft. Never call it from a scheduled, background or unattended task, and never as a follow-on to creating a draft. If in doubt, leave the draft for the user to send from Gmail.",
+    {
+      account: accountParam,
+      draft_id: z.string().describe("The draft ID the user has told you to send"),
+    },
+    { title: "Send draft (needs the user's go-ahead)", readOnlyHint: false, destructiveHint: true, openWorldHint: true },
+    async ({ account, draft_id }) => {
+      const drafts = await getDraftServiceForAccount(account);
+      return textResult({ account, sent: true, ...(await drafts.sendDraft(draft_id)) });
     }
   );
 

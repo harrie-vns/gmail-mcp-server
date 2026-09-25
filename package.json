@@ -1,13 +1,14 @@
 {
   "name": "gmail-mcp-server",
   "version": "1.0.0",
-  "description": "MCP server for Gmail — read, write, archive, label, unsubscribe",
+  "description": "MCP server for Gmail \u2014 read, write, archive, label, unsubscribe",
   "type": "module",
   "main": "dist/index.js",
   "scripts": {
     "build": "tsc",
     "start": "node dist/index.js",
-    "dev": "tsx watch src/index.ts"
+    "dev": "tsx watch src/index.ts",
+    "test": "tsx --test src/*.test.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.1",

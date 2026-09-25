@@ -67,6 +67,12 @@ This Gmail MCP server turns any MCP-compatible AI client into a full-featured em
 | `apply_label` | Apply a label to an email. Creates the label if it doesn't exist |
 | `unsubscribe_email` | Auto-unsubscribe from mailing lists and newsletters |
 | `batch_process` | Fetch a batch of emails for triage. Supports `account="all"` |
+| `create_draft` | Create a draft (optionally a threaded reply via `reply_to_message_id`). Never sends |
+| `list_drafts` | List an account's drafts: ID, to, subject, threadId, last updated |
+| `get_draft` | Get one draft in full, with a Gmail link |
+| `update_draft` | Replace a draft's subject and/or body; recipients and threading kept |
+| `delete_draft` | Delete a draft (drafts only, never messages) |
+| `send_draft` | Send a draft. **Only on the user's explicit go-ahead** — set it to "needs approval" in your client and never let an unattended task call it |
 
 ---
 
