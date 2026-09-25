@@ -128,7 +128,40 @@ export class DraftService {
     } catch {
       // The display name is cosmetic; the address alone is still correct.
     }
-    return { email: this.account };
+    // A primary address usually has no sendAs display name: Gmail sends under
+    // the Google account's name instead. Take that name from the account's own
+    // most recent sent mail, so drafts read the same as mail sent from Gmail.
+    const name = await this.nameFromSentMail();
+    return name ? { name, email: this.account } : { email: this.account };
+  }
+
+  private async nameFromSentMail(): Promise<string | undefined> {
+    try {
+      const list = await this.gmail.users.messages.list({
+        userId: "me",
+        q: "in:sent",
+        maxResults: 10,
+      });
+      for (const m of list.data.messages ?? []) {
+        const res = await this.gmail.users.messages.get({
+          userId: "me",
+          id: m.id!,
+          format: "metadata",
+          metadataHeaders: ["From"],
+        });
+        try {
+          const from = parseAddress(header(res.data.payload?.headers, "From"));
+          if (from.name && from.email.toLowerCase() === this.account.toLowerCase()) {
+            return from.name;
+          }
+        } catch {
+          // An unreadable From on one message; try the next.
+        }
+      }
+    } catch {
+      // Cosmetic, as above.
+    }
+    return undefined;
   }
 
   // -----------------------------------------------------------------------
