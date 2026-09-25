@@ -390,7 +390,7 @@ function createMcpServer(): McpServer {
   // ---- update_draft ----
   server.tool(
     "update_draft",
-    "Replace the subject and/or body of an existing draft. Recipients and threading are kept. Passing body_text without body_html makes the draft plain text; body_html needs body_text alongside it. Nothing is sent.",
+    "Replace the subject and/or body of an existing draft. Recipients and threading are kept. Passing body_text without body_html makes the draft plain text; body_html needs body_text alongside it. A draft with an attachment is refused (rebuilding it would drop the file). Nothing is sent.",
     {
       account: accountParam,
       draft_id: z.string().describe("The draft ID to update"),

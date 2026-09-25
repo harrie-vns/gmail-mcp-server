@@ -31,6 +31,7 @@ export interface DraftDetail extends DraftSummary {
   references: string;
   bodyText: string;
   bodyHtml: string | null;
+  hasAttachments: boolean;
   gmailLink: string;
 }
 
@@ -72,15 +73,24 @@ function findPart(
   return null;
 }
 
-/** Parse an address header Gmail handed back, keeping entries we can't parse out. */
-function addressesFromHeader(value: string): Address[] {
-  return splitAddressHeader(value).flatMap((p) => {
+/**
+ * Parse an address header Gmail handed back. Never drops a recipient quietly:
+ * an entry that won't parse is an error, not a shorter list.
+ */
+function addressesFromHeader(value: string, field: string): Address[] {
+  return splitAddressHeader(value).map((p) => {
     try {
-      return [parseAddress(p)];
+      return parseAddress(p);
     } catch {
-      return [];
+      throw new Error(`Couldn't read the ${field} address "${p}" on this message, so it can't be carried over safely.`);
     }
   });
+}
+
+function hasAttachment(part: gmail_v1.Schema$MessagePart | undefined): boolean {
+  if (!part) return false;
+  if (part.filename || part.body?.attachmentId) return true;
+  return (part.parts ?? []).some(hasAttachment);
 }
 
 function gmailError(err: any, what: string): Error {
@@ -161,13 +171,13 @@ export class DraftService {
       if (to.length === 0) {
         // Reply to whoever the sender asked replies to go to, else the sender.
         // If the account itself sent the original, reply to its recipients.
-        const fromAddrs = addressesFromHeader(header(h, "From"));
+        const fromAddrs = addressesFromHeader(header(h, "From"), "From");
         const sentByMe = fromAddrs.some(
           (a) => a.email.toLowerCase() === this.account.toLowerCase()
         );
         to = sentByMe
-          ? addressesFromHeader(header(h, "To"))
-          : addressesFromHeader(header(h, "Reply-To") || header(h, "From"));
+          ? addressesFromHeader(header(h, "To"), "To")
+          : addressesFromHeader(header(h, "Reply-To") || header(h, "From"), "Reply-To/From");
         if (to.length === 0) {
           throw new Error(
             `Couldn't work out who to reply to from message ${input.replyToMessageId}. Pass "to" explicitly.`
@@ -204,7 +214,7 @@ export class DraftService {
   async listDrafts(maxResults: number): Promise<DraftSummary[]> {
     const res = await this.gmail.users.drafts.list({ userId: "me", maxResults });
     const drafts = res.data.drafts ?? [];
-    return Promise.all(
+    const summaries = await Promise.all(
       drafts.map(async (d) => {
         const full = await this.gmail.users.drafts.get({
           userId: "me",
@@ -222,6 +232,8 @@ export class DraftService {
         };
       })
     );
+    // ISO strings sort chronologically; newest first.
+    return summaries.sort((a, b) => b.updated.localeCompare(a.updated));
   }
 
   async getDraft(draftId: string): Promise<DraftDetail> {
@@ -247,6 +259,7 @@ export class DraftService {
       updated: m.internalDate ? new Date(Number(m.internalDate)).toISOString() : "",
       bodyText: findPart(m.payload, "text/plain") ?? "",
       bodyHtml: findPart(m.payload, "text/html"),
+      hasAttachments: hasAttachment(m.payload),
       gmailLink: this.draftLink(m.id ?? ""),
     };
   }
@@ -264,6 +277,11 @@ export class DraftService {
     }
 
     const current = await this.getDraft(draftId);
+    if (current.hasAttachments) {
+      throw new Error(
+        `Draft ${draftId} has an attachment, which rebuilding it would drop. Edit it in Gmail instead: ${current.gmailLink}`
+      );
+    }
     const bodyText = input.bodyText ?? current.bodyText;
     // A new plain body without HTML makes the draft plain text; otherwise keep
     // the HTML part that was already there.
@@ -272,8 +290,8 @@ export class DraftService {
 
     const raw = buildRawMessage({
       from: await this.fromAddress(),
-      to: addressesFromHeader(current.to),
-      cc: addressesFromHeader(current.cc),
+      to: addressesFromHeader(current.to, "To"),
+      cc: addressesFromHeader(current.cc, "Cc"),
       subject: input.subject ?? current.subject,
       bodyText,
       bodyHtml,
