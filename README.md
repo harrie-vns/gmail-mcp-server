@@ -64,7 +64,10 @@ This Gmail MCP server turns any MCP-compatible AI client into a full-featured em
 | `list_emails` | Search and list emails using Gmail query syntax. Supports `account="all"` |
 | `get_email` | Get full email content, headers, and parsed unsubscribe links |
 | `archive_email` | Archive an email by removing it from the inbox |
-| `apply_label` | Apply a label to an email. Creates the label if it doesn't exist |
+| `list_labels` | Every label: ID, full name (nested like "Accounts/Invoices"), system/user, message counts |
+| `apply_label` | Add an existing label (name or ID) to a message or thread. Only creates one with `create_if_missing=true`; otherwise errors with the closest names |
+| `file_email` | Apply an existing label and remove it from the Inbox in one step. Fails without archiving if the label doesn't exist |
+| `remove_label` | Remove a label from a message or thread; `return_to_inbox=true` fully undoes `file_email` |
 | `unsubscribe_email` | Auto-unsubscribe from mailing lists and newsletters |
 | `batch_process` | Fetch a batch of emails for triage. Supports `account="all"` |
 | `create_draft` | Create a draft (optionally a threaded reply via `reply_to_message_id`). Never sends |

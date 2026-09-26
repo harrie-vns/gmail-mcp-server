@@ -7,6 +7,7 @@ import { timingSafeEqual } from "node:crypto";
 import { GmailService } from "./gmail-service.js";
 import { DraftService } from "./draft-service.js";
 import { TrashService, trashTarget } from "./trash-service.js";
+import { LabelService } from "./labels.js";
 import { TokenStore } from "./token-store.js";
 
 // ---------------------------------------------------------------------------
@@ -52,7 +53,7 @@ function makeOAuth2Client() {
 }
 
 async function getGmailServiceForAccount(email: string): Promise<GmailService> {
-  return new GmailService(await accessTokenFor(email));
+  return new GmailService(await accessTokenFor(email), email);
 }
 
 async function getDraftServiceForAccount(account: string): Promise<DraftService> {
@@ -61,6 +62,14 @@ async function getDraftServiceForAccount(account: string): Promise<DraftService>
   }
   const [email] = resolveAccounts(account);
   return new DraftService(await accessTokenFor(email), email);
+}
+
+async function getLabelServiceForAccount(account: string): Promise<LabelService> {
+  if (account.trim().toLowerCase() === "all") {
+    throw new Error('Labels belong to one account. Pass a single connected address, not "all".');
+  }
+  const [email] = resolveAccounts(account);
+  return (await getGmailServiceForAccount(email)).labelService;
 }
 
 async function getTrashServiceForAccount(account: string): Promise<TrashService> {
@@ -248,36 +257,97 @@ function createMcpServer(): McpServer {
     }
   );
 
+  // ---- list_labels ----
+  server.tool(
+    "list_labels",
+    "List every label in the account: ID, full name (nested labels read like 'Accounts/Invoices'), type (system or user) and message counts. User labels first, then system labels.",
+    {
+      account: z.string().describe("The connected address (one account, not 'all')"),
+    },
+    { title: "List labels", readOnlyHint: true, openWorldHint: false },
+    async ({ account }) => {
+      const labels = await getLabelServiceForAccount(account);
+      const all = await labels.listWithCounts();
+      return textResult({ account, count: all.length, labels: all });
+    }
+  );
+
+  const labelTarget = {
+    account: z.string().describe("The connected address the mail belongs to (one account, not 'all')"),
+    message_id: z.string().optional().describe("One message"),
+    thread_id: z.string().optional().describe("A whole thread (every message in it)"),
+  };
+
   // ---- apply_label ----
   server.tool(
     "apply_label",
-    "Apply a label to an email. Creates the label if it does not already exist.",
+    "Add a label to a message or whole thread. The label must already exist unless create_if_missing=true; if it doesn't, the error lists the closest existing labels and nothing is changed. Does not archive (see file_email).",
     {
-      account: z
-        .string()
-        .describe("Email address of the account this message belongs to"),
-      message_id: z.string().describe("The Gmail message ID"),
-      label_name: z
-        .string()
-        .describe(
-          "Label name to apply (e.g. 'Receipts', 'Follow Up'). Created automatically if it does not exist."
-        ),
+      ...labelTarget,
+      label: z.string().optional().describe("Label name (e.g. 'Accounts/Invoices') or ID (e.g. 'Label_98')"),
+      label_name: z.string().optional().describe("Older name for 'label'; still accepted"),
+      create_if_missing: z
+        .boolean()
+        .default(false)
+        .describe("Create the label if it doesn't exist. Off by default so a typo can't start a new label."),
     },
-    async ({ account, message_id, label_name }) => {
-      const gmail = await getGmailServiceForAccount(account);
-      const result = await gmail.applyLabel(message_id, label_name);
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: JSON.stringify({
-              account,
-              ...result,
-              message: `Label "${label_name}" applied to email ${message_id}.`,
-            }),
-          },
-        ],
-      };
+    { title: "Apply label", readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    async ({ account, message_id, thread_id, label, label_name, create_if_missing }) => {
+      const target = trashTarget(message_id, thread_id);
+      const ref = label ?? label_name;
+      if (!ref) throw new Error('Pass "label": a label name or ID.');
+      const labels = await getLabelServiceForAccount(account);
+      const resolved = await labels.resolve(ref, create_if_missing);
+      const after = await labels.modify(target, [resolved.id], []);
+      return textResult({
+        account,
+        applied: { id: resolved.id, name: resolved.name, created: resolved.created },
+        ...after,
+      });
+    }
+  );
+
+  // ---- file_email ----
+  server.tool(
+    "file_email",
+    "File a message or whole thread: apply an EXISTING label and remove it from the Inbox, in one step. If the label doesn't exist it fails, lists the closest labels, and leaves the mail in the Inbox untouched. Undo with remove_label (return_to_inbox=true).",
+    {
+      ...labelTarget,
+      label: z.string().describe("Existing label name (e.g. 'Accounts/Invoices') or ID"),
+    },
+    { title: "File email", readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    async ({ account, message_id, thread_id, label }) => {
+      const target = trashTarget(message_id, thread_id);
+      const labels = await getLabelServiceForAccount(account);
+      const resolved = await labels.resolve(label, false);
+      if (resolved.id === "INBOX") throw new Error("Filing into INBOX would do nothing. Name the label to file under.");
+      const after = await labels.modify(target, [resolved.id], ["INBOX"]);
+      return textResult({ account, filed_under: { id: resolved.id, name: resolved.name }, archived: true, ...after });
+    }
+  );
+
+  // ---- remove_label ----
+  server.tool(
+    "remove_label",
+    "Remove a label from a message or whole thread, e.g. to undo a wrong filing. return_to_inbox=true also puts it back in the Inbox, fully undoing file_email.",
+    {
+      ...labelTarget,
+      label: z.string().describe("Label name or ID to remove"),
+      return_to_inbox: z
+        .boolean()
+        .default(false)
+        .describe("Also put the mail back in the Inbox (undoes file_email's archive)"),
+    },
+    { title: "Remove label", readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    async ({ account, message_id, thread_id, label, return_to_inbox }) => {
+      const target = trashTarget(message_id, thread_id);
+      const labels = await getLabelServiceForAccount(account);
+      const resolved = await labels.resolve(label, false);
+      if (resolved.id === "INBOX" && return_to_inbox) {
+        throw new Error("Removing INBOX and returning to the Inbox cancel out. Pick one. Nothing was changed.");
+      }
+      const after = await labels.modify(target, return_to_inbox ? ["INBOX"] : [], [resolved.id]);
+      return textResult({ account, removed: { id: resolved.id, name: resolved.name }, returned_to_inbox: return_to_inbox, ...after });
     }
   );
 
