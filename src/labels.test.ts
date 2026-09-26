@@ -29,3 +29,8 @@ test("closest names put the near misses first", () => {
   assert.equal(closestLabelNames("Invoices", labels)[0], "Accounts/Invoices");
   assert.equal(closestLabelNames("fjord", labels)[0], "Horses/Fjords");
 });
+
+test("closest names leave out unrelated labels", () => {
+  assert.deepEqual(closestLabelNames("Enquries", [...labels, { id: "L1", name: "ENquiries", type: "user" }]), ["ENquiries"]);
+  assert.deepEqual(closestLabelNames("Zebra crossing", labels), []);
+});

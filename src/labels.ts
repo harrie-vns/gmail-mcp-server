@@ -62,6 +62,9 @@ export function closestLabelNames(wanted: string, labels: LabelInfo[], limit = 5
         ) - (contains ? 100 : 0);
       return { name: l.name, score, user: l.type === "user" };
     })
+    // Only genuine near misses: a name containing the other, or within about
+    // a third of its length in edits. Unrelated system labels are noise.
+    .filter((x) => x.score < 0 || x.score <= Math.max(2, Math.floor(w.length / 3)))
     .sort((a, b) => a.score - b.score || Number(b.user) - Number(a.user) || a.name.localeCompare(b.name))
     .slice(0, limit)
     .map((x) => x.name);
@@ -146,9 +149,13 @@ export class LabelService {
 
     if (!create) {
       const near = closestLabelNames(wanted, labels);
+      // With no near miss, list the account's own labels so the caller can choose.
+      const offer = near.length
+        ? `Closest existing: ${near.map((n) => `"${n}"`).join(", ")}.`
+        : `No close match. This account's labels: ${labels.filter((l) => l.type === "user").map((l) => `"${l.name}"`).join(", ") || "none"}.`;
       throw new Error(
-        `No label "${wanted}" in ${this.account}. Closest existing: ${near.map((n) => `"${n}"`).join(", ") || "none"}. ` +
-          `Use one of those, or pass create_if_missing=true on apply_label to create it. Nothing was changed.`
+        `No label "${wanted}" in ${this.account}. ${offer} ` +
+          `Use an existing label, or create it with apply_label and create_if_missing=true. Nothing was changed.`
       );
     }
     const created = await this.gmail.users.labels.create({
