@@ -361,6 +361,29 @@ function createMcpServer(): McpServer {
     }
   );
 
+  // ---- create_forward_draft ----
+  server.tool(
+    "create_forward_draft",
+    "Create a DRAFT that forwards an existing message, with every original attachment (inline images included), a 'Fwd:' subject and the original quoted under Gmail's usual 'Forwarded message' header. It is NOT sent. From is the account's own address. Returns the draft ID, a Gmail link, and the attachments carried over.",
+    {
+      account: accountParam,
+      message_id: z.string().describe("Gmail message ID of the message to forward"),
+      to: z
+        .union([z.string(), z.array(z.string())])
+        .describe("Who to forward it to: an address, 'Name <address>', a comma-separated string, or an array"),
+      note: z
+        .string()
+        .optional()
+        .describe("Optional text above the forwarded message, stored exactly as given"),
+    },
+    { title: "Create forward draft", readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+    async ({ account, message_id, to, note }) => {
+      const drafts = await getDraftServiceForAccount(account);
+      const draft = await drafts.createForwardDraft({ messageId: message_id, to, note });
+      return textResult({ account, ...draft, sent: false });
+    }
+  );
+
   // ---- list_drafts ----
   server.tool(
     "list_drafts",
