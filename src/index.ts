@@ -6,6 +6,7 @@ import { z } from "zod";
 import { timingSafeEqual } from "node:crypto";
 import { GmailService } from "./gmail-service.js";
 import { DraftService } from "./draft-service.js";
+import { TrashService, trashTarget } from "./trash-service.js";
 import { TokenStore } from "./token-store.js";
 
 // ---------------------------------------------------------------------------
@@ -60,6 +61,14 @@ async function getDraftServiceForAccount(account: string): Promise<DraftService>
   }
   const [email] = resolveAccounts(account);
   return new DraftService(await accessTokenFor(email), email);
+}
+
+async function getTrashServiceForAccount(account: string): Promise<TrashService> {
+  if (account.trim().toLowerCase() === "all") {
+    throw new Error('Trash acts on one account. Pass a single connected address, not "all".');
+  }
+  const [email] = resolveAccounts(account);
+  return new TrashService(await accessTokenFor(email));
 }
 
 async function accessTokenFor(email: string): Promise<string> {
@@ -437,6 +446,44 @@ function createMcpServer(): McpServer {
     async ({ account, draft_id }) => {
       const drafts = await getDraftServiceForAccount(account);
       return textResult({ account, sent: true, ...(await drafts.sendDraft(draft_id)) });
+    }
+  );
+
+  // ---- trash_email ----
+  server.tool(
+    "trash_email",
+    "Move one message (message_id) or a whole thread (thread_id) to Gmail's Trash. Recoverable for 30 days, and untrash_email undoes it. Never deletes permanently. Returns the sender, subject and date of what was trashed.",
+    {
+      account: z.string().describe("The connected address the mail belongs to (one account, not 'all')"),
+      message_id: z.string().optional().describe("Trash this one message"),
+      thread_id: z.string().optional().describe("Trash every message in this thread"),
+    },
+    { title: "Move to Trash", readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    async ({ account, message_id, thread_id }) => {
+      const target = trashTarget(message_id, thread_id);
+      const trash = await getTrashServiceForAccount(account);
+      return textResult({ account, trashed: true, ...(await trash.trash(target)) });
+    }
+  );
+
+  // ---- untrash_email ----
+  server.tool(
+    "untrash_email",
+    "Move a message (message_id) or whole thread (thread_id) back out of Trash, undoing trash_email. By default it goes back to the Inbox, like Gmail's 'Move to Inbox'; pass to_inbox=false to restore it archived. Returns the sender, subject and date of what was restored.",
+    {
+      account: z.string().describe("The connected address the mail belongs to (one account, not 'all')"),
+      message_id: z.string().optional().describe("Restore this one message"),
+      thread_id: z.string().optional().describe("Restore every message in this thread"),
+      to_inbox: z
+        .boolean()
+        .default(true)
+        .describe("Put it back in the Inbox (default). false restores it to All Mail only."),
+    },
+    { title: "Restore from Trash", readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    async ({ account, message_id, thread_id, to_inbox }) => {
+      const target = trashTarget(message_id, thread_id);
+      const trash = await getTrashServiceForAccount(account);
+      return textResult({ account, restored: true, ...(await trash.untrash(target, to_inbox)) });
     }
   );
 

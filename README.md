@@ -73,6 +73,8 @@ This Gmail MCP server turns any MCP-compatible AI client into a full-featured em
 | `update_draft` | Replace a draft's subject and/or body; recipients and threading kept |
 | `delete_draft` | Delete a draft (drafts only, never messages) |
 | `send_draft` | Send a draft. **Only on the user's explicit go-ahead** — set it to "needs approval" in your client and never let an unattended task call it |
+| `trash_email` | Move a message or whole thread to Trash (recoverable for 30 days). Never deletes permanently |
+| `untrash_email` | Move a message or thread back out of Trash, into the Inbox by default |
 
 ---
 

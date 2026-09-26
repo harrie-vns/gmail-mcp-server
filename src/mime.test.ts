@@ -85,3 +85,23 @@ test("mail is sent only from the two approved places", () => {
     "gmail-service.ts:await this.gmail.users.messages.send({",
   ]);
 });
+
+// Trash is Gmail's recoverable Trash only. Nothing may delete permanently.
+test("nothing deletes mail permanently", () => {
+  const dir = new URL(".", import.meta.url);
+  const hits: string[] = [];
+  for (const f of readdirSync(dir).filter((f) => f.endsWith(".ts") && !f.endsWith(".test.ts"))) {
+    readFileSync(new URL(f, dir), "utf8").split("\n").forEach((line) => {
+      if (/\b(messages|threads)\.(delete|batchDelete)\s*\(/.test(line)) hits.push(`${f}:${line.trim()}`);
+    });
+  }
+  assert.deepEqual(hits, []);
+});
+
+test("trash needs exactly one target", async () => {
+  const { trashTarget } = await import("./trash-service.js");
+  assert.deepEqual(trashTarget("m1", undefined), { messageId: "m1" });
+  assert.deepEqual(trashTarget(undefined, "t1"), { threadId: "t1" });
+  assert.throws(() => trashTarget("m1", "t1"), /not both/);
+  assert.throws(() => trashTarget(undefined, " "), /Pass message_id/);
+});
