@@ -1,4 +1,5 @@
 import { google, gmail_v1 } from "googleapis";
+import { LabelService } from "./labels.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -12,6 +13,8 @@ export interface EmailSummary {
   date: string;
   snippet: string;
   labelIds: string[];
+  /** The same labels with names: "Label_98 (Accounts)", "INBOX". */
+  labels: string[];
 }
 
 export interface EmailDetail {
@@ -24,6 +27,7 @@ export interface EmailDetail {
   snippet: string;
   body: string;
   labelIds: string[];
+  labels: string[];
   headers: Record<string, string>;
   unsubscribeLinks: string[];
 }
@@ -40,11 +44,13 @@ export interface UnsubscribeResult {
 
 export class GmailService {
   private gmail: gmail_v1.Gmail;
+  readonly labelService: LabelService;
 
-  constructor(accessToken: string) {
+  constructor(accessToken: string, account: string) {
     const auth = new google.auth.OAuth2();
     auth.setCredentials({ access_token: accessToken });
     this.gmail = google.gmail({ version: "v1", auth });
+    this.labelService = new LabelService(this.gmail, account);
   }
 
   // -----------------------------------------------------------------------
@@ -93,6 +99,7 @@ export class GmailService {
       date: hdr("Date"),
       snippet: res.data.snippet ?? "",
       labelIds: res.data.labelIds ?? [],
+      labels: await this.labelService.display(res.data.labelIds ?? []),
     };
   }
 
@@ -130,6 +137,7 @@ export class GmailService {
       snippet: res.data.snippet ?? "",
       body,
       labelIds: res.data.labelIds ?? [],
+      labels: await this.labelService.display(res.data.labelIds ?? []),
       headers: headersMap,
       unsubscribeLinks,
     };
@@ -148,47 +156,6 @@ export class GmailService {
       },
     });
     return { success: true };
-  }
-
-  // -----------------------------------------------------------------------
-  // apply_label — create if needed, then apply
-  // -----------------------------------------------------------------------
-
-  async applyLabel(
-    messageId: string,
-    labelName: string
-  ): Promise<{ success: boolean; labelId: string }> {
-    const labelId = await this.getOrCreateLabel(labelName);
-
-    await this.gmail.users.messages.modify({
-      userId: "me",
-      id: messageId,
-      requestBody: {
-        addLabelIds: [labelId],
-      },
-    });
-
-    return { success: true, labelId };
-  }
-
-  private async getOrCreateLabel(labelName: string): Promise<string> {
-    // Check existing labels
-    const res = await this.gmail.users.labels.list({ userId: "me" });
-    const existing = (res.data.labels ?? []).find(
-      (l) => l.name?.toLowerCase() === labelName.toLowerCase()
-    );
-    if (existing) return existing.id!;
-
-    // Create new label
-    const created = await this.gmail.users.labels.create({
-      userId: "me",
-      requestBody: {
-        name: labelName,
-        labelListVisibility: "labelShow",
-        messageListVisibility: "show",
-      },
-    });
-    return created.data.id!;
   }
 
   // -----------------------------------------------------------------------
