@@ -343,6 +343,9 @@ function createMcpServer(): McpServer {
       const target = trashTarget(message_id, thread_id);
       const labels = await getLabelServiceForAccount(account);
       const resolved = await labels.resolve(label, false);
+      if (resolved.id === "INBOX" && return_to_inbox) {
+        throw new Error("Removing INBOX and returning to the Inbox cancel out. Pick one. Nothing was changed.");
+      }
       const after = await labels.modify(target, return_to_inbox ? ["INBOX"] : [], [resolved.id]);
       return textResult({ account, removed: { id: resolved.id, name: resolved.name }, returned_to_inbox: return_to_inbox, ...after });
     }
