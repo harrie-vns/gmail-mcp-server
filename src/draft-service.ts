@@ -1,7 +1,12 @@
 import { google, gmail_v1 } from "googleapis";
 import {
   Address,
+  buildForwardMessage,
   buildRawMessage,
+  escapeHtml,
+  forwardedBlock,
+  forwardSubject,
+  MimeAttachment,
   parseAddress,
   parseAddressList,
   replyReferences,
@@ -235,6 +240,147 @@ export class DraftService {
       requestBody: { message: { raw, threadId } },
     });
     return this.getDraft(res.data.id!);
+  }
+
+  // -----------------------------------------------------------------------
+  // create_forward_draft — a DRAFT forwarding an existing message with every
+  // original attachment. It is never sent here.
+  // -----------------------------------------------------------------------
+
+  async createForwardDraft(input: {
+    messageId: string;
+    to: string | string[];
+    note?: string;
+  }): Promise<DraftDetail & { forwardedAttachments: Array<{ filename: string; mimeType: string; bytes: number; inline: boolean }> }> {
+    const to = parseAddressList(input.to, "to");
+    if (to.length === 0) throw new Error('"to" is required: who should the forward go to?');
+
+    let original: gmail_v1.Schema$Message;
+    try {
+      const res = await this.gmail.users.messages.get({ userId: "me", id: input.messageId, format: "full" });
+      original = res.data;
+    } catch (err) {
+      throw gmailError(err, `Message ${input.messageId}`);
+    }
+    const h = original.payload?.headers;
+
+    // Walk the MIME tree once. The message body is the first text/plain and
+    // the first text/html leaf that carry no filename. EVERY other leaf is an
+    // attachment and is copied whole: named files, inline images, and nameless
+    // parts too (Gmail lists those as "noname"), so nothing is left behind. An
+    // attachment is never descended into, so an attached email's own parts
+    // aren't pulled out twice.
+    let textPart: gmail_v1.Schema$MessagePart | undefined;
+    let htmlPart: gmail_v1.Schema$MessagePart | undefined;
+    const attachmentParts: gmail_v1.Schema$MessagePart[] = [];
+    const walk = (part: gmail_v1.Schema$MessagePart | undefined) => {
+      if (!part) return;
+      const hasContent = !!(part.body?.data || part.body?.attachmentId);
+      const isContainer = part.mimeType?.startsWith("multipart/") || (!hasContent && (part.parts?.length ?? 0) > 0);
+      if (isContainer) {
+        for (const child of part.parts ?? []) walk(child);
+        return;
+      }
+      if (!part.filename && part.mimeType === "text/plain" && !textPart) textPart = part;
+      else if (!part.filename && part.mimeType === "text/html" && !htmlPart) htmlPart = part;
+      else if (hasContent) attachmentParts.push(part);
+    };
+    walk(original.payload);
+
+    const partBytes = async (part: gmail_v1.Schema$MessagePart): Promise<Buffer> => {
+      if (part.body?.data) return Buffer.from(part.body.data, "base64url");
+      if (part.body?.attachmentId) {
+        const res = await this.gmail.users.messages.attachments.get({
+          userId: "me",
+          messageId: input.messageId,
+          id: part.body.attachmentId,
+        });
+        if (!res.data.data) throw new Error(`Gmail returned no data for "${part.filename || part.mimeType}".`);
+        return Buffer.from(res.data.data, "base64url");
+      }
+      return Buffer.alloc(0);
+    };
+
+    const originalText = textPart ? (await partBytes(textPart)).toString("utf-8") : "";
+    const originalHtml = htmlPart ? (await partBytes(htmlPart)).toString("utf-8") : "";
+
+    // Every attachment or none: a forward quietly missing a file is worse
+    // than a clear error.
+    const attachments: MimeAttachment[] = [];
+    for (const part of attachmentParts) {
+      let bytes: Buffer;
+      try {
+        bytes = await partBytes(part);
+      } catch (err: any) {
+        throw new Error(`Couldn't fetch the attachment "${part.filename || part.mimeType}": ${err?.message ?? err}. No draft was created.`);
+      }
+      const contentId = header(part.headers, "Content-ID") || undefined;
+      const disposition = header(part.headers, "Content-Disposition").toLowerCase();
+      const cid = contentId?.replace(/^<|>$/g, "");
+      const referenced = !!cid && originalHtml.includes(`cid:${cid}`);
+      attachments.push({
+        filename: part.filename || "noname",
+        mimeType: part.mimeType || "application/octet-stream",
+        base64: bytes.toString("base64"),
+        contentId,
+        inline: referenced || (!!contentId && disposition.startsWith("inline")),
+      });
+    }
+
+    const block = forwardedBlock({
+      from: header(h, "From"),
+      date: header(h, "Date"),
+      subject: header(h, "Subject"),
+      to: header(h, "To"),
+      cc: header(h, "Cc"),
+    });
+    const note = input.note ?? "";
+    const plainOriginal =
+      originalText ||
+      originalHtml
+        .replace(/<(br|\/p|\/div)[^>]*>/gi, "\n")
+        .replace(/<[^>]+>/g, "")
+        .replace(/&nbsp;/g, " ")
+        .replace(/&amp;/g, "&")
+        .replace(/&lt;/g, "<")
+        .replace(/&gt;/g, ">");
+    const bodyText = `${note ? note + "\n\n" : ""}${block.text}\n\n${plainOriginal}`;
+    const bodyHtml =
+      (note ? `<div>${escapeHtml(note).replace(/\r?\n/g, "<br>")}</div><br>` : "") +
+      block.html +
+      (originalHtml || `<div style="white-space:pre-wrap">${escapeHtml(originalText)}</div>`);
+
+    // Stay in the original's conversation, as Gmail's own Forward does.
+    const messageIdHeader = header(h, "Message-ID");
+    const raw = buildForwardMessage({
+      from: await this.fromAddress(),
+      to,
+      cc: [],
+      subject: forwardSubject(header(h, "Subject")),
+      bodyText,
+      bodyHtml,
+      inReplyTo: messageIdHeader || undefined,
+      references: messageIdHeader ? replyReferences(header(h, "References"), messageIdHeader) : undefined,
+      attachments,
+    });
+
+    // A media upload rather than a raw field, so attachments up to Gmail's
+    // 25 MB message limit fit.
+    const res = await this.gmail.users.drafts.create({
+      userId: "me",
+      requestBody: { message: { threadId: original.threadId ?? undefined } },
+      media: { mimeType: "message/rfc822", body: raw },
+    });
+    const draft = await this.getDraft(res.data.id!);
+    return {
+      ...draft,
+      forwardedAttachments: attachments.map((a) => ({
+        filename: a.filename,
+        mimeType: a.mimeType,
+        bytes: Buffer.from(a.base64, "base64").length,
+        inline: !!a.inline,
+      })),
+    };
   }
 
   // -----------------------------------------------------------------------

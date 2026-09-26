@@ -8,6 +8,9 @@ import {
   replyReferences,
   replySubject,
   splitAddressHeader,
+  buildForwardMessage,
+  forwardSubject,
+  forwardedBlock,
 } from "./mime.js";
 
 const decode = (raw: string) => Buffer.from(raw, "base64url").toString("utf8");
@@ -104,4 +107,39 @@ test("trash needs exactly one target", async () => {
   assert.deepEqual(trashTarget(undefined, "t1"), { threadId: "t1" });
   assert.throws(() => trashTarget("m1", "t1"), /not both/);
   assert.throws(() => trashTarget(undefined, " "), /Pass message_id/);
+});
+
+test("forward subject gets exactly one Fwd:", () => {
+  assert.equal(forwardSubject("Hay order"), "Fwd: Hay order");
+  assert.equal(forwardSubject("FW: Hay order"), "FW: Hay order");
+  assert.equal(forwardSubject("Fwd: Hay order"), "Fwd: Hay order");
+});
+
+test("forward carries every attachment, inline images in related", () => {
+  const pdf = Buffer.from("%PDF-1.4 fake").toString("base64");
+  const png = Buffer.from("\x89PNG fake").toString("base64");
+  const block = forwardedBlock({ from: "Jo <jo@y.com>", date: "Mon", subject: "Hay", to: "h@x.com", cc: "" });
+  const raw = buildForwardMessage({
+    from: { email: "h@x.com" },
+    to: [{ email: "vet@z.com" }],
+    cc: [],
+    subject: forwardSubject("Hay"),
+    bodyText: `FYI\n\n${block.text}\n\noriginal`,
+    bodyHtml: `${block.html}<img src="cid:img1@y">`,
+    attachments: [
+      { filename: "invoice.pdf", mimeType: "application/pdf", base64: pdf },
+      { filename: "logo.png", mimeType: "image/png", base64: png, contentId: "<img1@y>", inline: true },
+      { filename: "résumé.pdf", mimeType: "application/pdf", base64: pdf },
+    ],
+  });
+  assert.match(raw, /^From: h@x\.com\r\n/);
+  assert.match(raw, /\r\nSubject: Fwd: Hay\r\n/);
+  assert.match(raw, /multipart\/mixed/);
+  assert.match(raw, /multipart\/related/);
+  assert.equal((raw.match(/Content-Disposition: attachment/g) ?? []).length, 2);
+  assert.equal((raw.match(/Content-Disposition: inline/g) ?? []).length, 1);
+  assert.match(raw, /Content-ID: <img1@y>/);
+  assert.match(raw, /filename="=\?UTF-8\?B\?/);
+  assert.ok(raw.includes(pdf));
+  assert.doesNotMatch(forwardedBlock({ from: "<b>x</b>", date: "", subject: "", to: "", cc: "" }).html, /<b>/);
 });
