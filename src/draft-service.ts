@@ -264,23 +264,26 @@ export class DraftService {
     }
     const h = original.payload?.headers;
 
-    // Walk the MIME tree once. A part with a filename, or an inline part with
-    // a Content-ID, is an attachment and is copied whole (never descended
-    // into, so an attached email's own parts aren't pulled out twice). The
-    // first unnamed text/plain and text/html leaves are the message body.
+    // Walk the MIME tree once. The message body is the first text/plain and
+    // the first text/html leaf that carry no filename. EVERY other leaf is an
+    // attachment and is copied whole: named files, inline images, and nameless
+    // parts too (Gmail lists those as "noname"), so nothing is left behind. An
+    // attachment is never descended into, so an attached email's own parts
+    // aren't pulled out twice.
     let textPart: gmail_v1.Schema$MessagePart | undefined;
     let htmlPart: gmail_v1.Schema$MessagePart | undefined;
     const attachmentParts: gmail_v1.Schema$MessagePart[] = [];
     const walk = (part: gmail_v1.Schema$MessagePart | undefined) => {
       if (!part) return;
-      const contentId = header(part.headers, "Content-ID");
-      if (part.filename || (contentId && !part.mimeType?.startsWith("multipart/") && !/^text\/(plain|html)$/.test(part.mimeType ?? ""))) {
-        attachmentParts.push(part);
+      const hasContent = !!(part.body?.data || part.body?.attachmentId);
+      const isContainer = part.mimeType?.startsWith("multipart/") || (!hasContent && (part.parts?.length ?? 0) > 0);
+      if (isContainer) {
+        for (const child of part.parts ?? []) walk(child);
         return;
       }
-      if (part.mimeType === "text/plain" && !textPart) textPart = part;
-      else if (part.mimeType === "text/html" && !htmlPart) htmlPart = part;
-      for (const child of part.parts ?? []) walk(child);
+      if (!part.filename && part.mimeType === "text/plain" && !textPart) textPart = part;
+      else if (!part.filename && part.mimeType === "text/html" && !htmlPart) htmlPart = part;
+      else if (hasContent) attachmentParts.push(part);
     };
     walk(original.payload);
 
@@ -316,7 +319,7 @@ export class DraftService {
       const cid = contentId?.replace(/^<|>$/g, "");
       const referenced = !!cid && originalHtml.includes(`cid:${cid}`);
       attachments.push({
-        filename: part.filename || "",
+        filename: part.filename || "noname",
         mimeType: part.mimeType || "application/octet-stream",
         base64: bytes.toString("base64"),
         contentId,
